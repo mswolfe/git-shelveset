@@ -1,0 +1,137 @@
+#!/bin/sh
+# Copyright (c) 2007, Nanako Shiraishi
+
+dashless=$(basename "$0" | sed -e 's/-/ /')
+USAGE="list 
+   or: $dashless drop <shelveset_name>
+   or: $dashless apply <shelveset_name>
+   or: $dashless save <shelveset_name>
+   or: $dashless clean"
+
+SUBDIRECTORY_OK=Yes
+OPTIONS_SPEC=
+START_DIR=`pwd`
+. git-sh-setup
+. git-sh-i18n
+require_work_tree
+cd_to_toplevel
+
+TMP="$GIT_DIR/.git-stash.$$"
+TMPindex=${GIT_INDEX_FILE-"$GIT_DIR/index"}.stash.$$
+trap 'rm -f "$TMP-"* "$TMPindex"' 0
+
+shelveset_user=`git config user.name | sed 's/ /_/'`
+ref_shelveset="shelvesets/$shelveset_user"
+
+if git config --get-colorbool color.interactive; then
+       help_color="$(git config --get-color color.interactive.help 'red bold')"
+       reset_color="$(git config --get-color '' reset)"
+else
+       help_color=
+       reset_color=
+fi
+
+no_changes () {
+	git diff-index --quiet --cached HEAD --ignore-submodules -- &&
+	git diff-files --quiet --ignore-submodules &&
+	(test -z "$untracked" || test -z "$(untracked_files)")
+}
+
+save_shelveset () {
+	shelve_msg="$(echo $* | sed -e 's/ /_/'g)"
+
+	git update-index -q --refresh
+	if no_changes
+	then
+		say "$(gettext "No local changes to save")"
+		exit 0
+	fi
+
+	cur_branch=$(git rev-parse --quiet --abbrev-ref HEAD)
+	shelve_name="$ref_shelveset/$shelve_msg"
+
+	git checkout --quiet -b $shelve_name 
+	git add --all .
+	git commit --quiet -m "Shelveset: $shelve_msg"
+	git push --quiet origin $shelve_name
+	git checkout --quiet $cur_branch
+	git branch --quiet -D $shelve_name
+
+	say Saved working directory on remote origin as "$shelve_name"
+}
+
+list_shelveset () {
+	git ls-remote --heads origin | sed "s?.*refs/heads/$ref_shelveset/??" | sed '/.*refs/ d'
+}
+
+apply_shelveset () {
+	git update-index -q --refresh || die "$(gettext "unable to refresh index")"
+
+	# current index state
+	c_tree=$(git write-tree) ||
+		die "$(gettext "Cannot apply a stash in the middle of a merge")"
+
+	shelve_name="$(echo $ref_shelveset/$* | sed -e 's/ /_/'g)"
+	git fetch --quiet origin $shelve_name
+
+	shelve_commit=$(git rev-parse origin/$shelve_name)
+	git cherry-pick --quiet --no-commit $shelve_commit origin/$shelve_name
+	git reset --quiet
+}
+
+clean_shelveset () {
+	git cherry-pick --abort
+}
+
+drop_shelveset () {
+	shelve_name="$ref_shelveset/$*"
+
+	git push --quiet origin :$shelve_name
+}
+
+PARSE_CACHE='--not-parsed'
+# The default command is "list" if nothing but options are given
+seen_non_option=
+for opt
+do
+	case "$opt" in
+	-*) ;;
+	*) seen_non_option=t; break ;;
+	esac
+done
+
+test -n "$seen_non_option" || set "list" "$@"
+
+# Main command set
+case "$1" in
+list)
+	shift
+	list_shelveset "$@"
+	;;
+save)
+	shift
+	save_shelveset "$@"
+	;;
+apply)
+	shift
+	apply_shelveset "$@"
+	;;
+drop)
+	shift
+	drop_shelveset "$@"
+	;;
+clean)
+	shift
+	clean_shelveset "$@"
+	;;
+*)
+	case $# in
+	0)
+		list_stash &&
+		say "$(gettext "(To restore them type \"git shelveset apply <shelveset_name>\")")"
+		;;
+	*)
+		usage
+	esac
+	;;
+esac
